@@ -1,0 +1,24 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+}
+body {
+  background: #0e1215;
+  color: #e9edf0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+img {
+  max-width: 100%;
+}
+.page-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: #8d9aa6;
+}
