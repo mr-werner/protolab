@@ -28,6 +28,7 @@ const paths = {
   ),
   polygon: <path d="M8 4h8l4 7-4 7H8l-4-7zM4 11h16" />,
   text: <path d="M5 6V4h14v2M12 4v16M9 20h6" />,
+  sketch: <path d="M4 18l4-10 5 6 3-4 4 8zM15 4l5 5-2 2-5-5z" />,
 };
 
 export function ShapeIcon({ type }) {

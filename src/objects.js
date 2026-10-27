@@ -61,7 +61,7 @@ export const SHAPES = {
 };
 
 // Shapes whose edges can be rounded or beveled.
-export const EDGE_TYPES = new Set(["box", "cylinder", "tube", "cone", "polygon"]);
+export const EDGE_TYPES = new Set(["box", "cylinder", "tube", "cone", "polygon", "sketch"]);
 
 let counter = 0;
 export const newId = () => `o${Date.now().toString(36)}${(counter++).toString(36)}`;

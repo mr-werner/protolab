@@ -119,6 +119,18 @@ export function resizePart(o, [fx, fy, fz]) {
       p.size = r(p.size * xy);
       p.depth = r(p.depth * fz);
       break;
+    case "sketch": {
+      // Extrude: sketch X/Y are the part's X/Y. Revolve: sketch X is the radius and Y the height.
+      const [sx, sy] = p.op === "revolve" ? [xy, fz] : [fx, fy];
+      const k = (sx + sy) / 2;
+      p.shapes = (p.shapes || []).map((s) =>
+        s.kind === "circle"
+          ? { ...s, c: [round(s.c[0] * sx), round(s.c[1] * sy)], r: r(s.r * k) }
+          : { ...s, pts: s.pts.map(([x, y]) => [round(x * sx), round(y * sy)]), bulge: (s.bulge || []).map((b) => round(b * k)), radius: round((s.radius || 0) * Math.min(sx, sy)) }
+      );
+      if (p.op !== "revolve") p.height = r((p.height || 10) * fz);
+      break;
+    }
     case "import":
       return { ...o, scale: round((o.scale || 1) * all) };
     default:

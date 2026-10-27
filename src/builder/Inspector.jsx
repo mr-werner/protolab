@@ -2,7 +2,7 @@ import { SHAPES, EDGE_TYPES } from "../objects.js";
 import { FONTS } from "../config.js";
 import { NumberField, Triple, ArrangeTools } from "./fields.jsx";
 
-export default function Inspector({ object, importInfo, error, unit, ops, onChange, onDuplicate, onDelete, onClose }) {
+export default function Inspector({ object, importInfo, error, unit, ops, onChange, onDuplicate, onDelete, onEditSketch, onClose }) {
   const def = SHAPES[object.type];
   const setParam = (key, value) => onChange({ params: { ...object.params, [key]: value } }, `p.${key}`);
   const edgeStyle = object.params.edgeStyle || "none";
@@ -28,7 +28,29 @@ export default function Inspector({ object, importInfo, error, unit, ops, onChan
       {error && <p className="b-err">This part couldn't be built: {error}</p>}
 
       <section>
-        <h3>{object.type === "text" ? "Text" : def ? `${def.label} size` : "Imported file"}</h3>
+        <h3>{object.type === "text" ? "Text" : object.type === "sketch" ? "Sketch" : def ? `${def.label} size` : "Imported file"}</h3>
+        {object.type === "sketch" && (
+          <>
+            <button className="b-btn small" onClick={onEditSketch}>
+              Edit sketch
+            </button>
+            <div className="b-seg wide small" role="group" aria-label="Extrude or revolve">
+              {[
+                ["extrude", "Extrude"],
+                ["revolve", "Revolve"],
+              ].map(([v, l]) => (
+                <button key={v} className={(object.params.op || "extrude") === v ? "on" : ""} onClick={() => setParam("op", v)}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            {object.params.op === "revolve" ? (
+              <NumberField label="Angle" value={object.params.angle ?? 360} min={1} max={360} step={15} unit="°" onChange={(v) => setParam("angle", v)} />
+            ) : (
+              <NumberField label="Height" value={object.params.height ?? 10} min={0.2} max={256} unit={unit} onChange={(v) => setParam("height", v)} />
+            )}
+          </>
+        )}
         {object.type === "text" && (
           <>
             <label className="f-text">

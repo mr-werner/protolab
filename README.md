@@ -15,11 +15,12 @@ A 3D builder that runs in the browser. People start from a template or their own
 
 ## Builder tools
 
-- **Parts:** box, cylinder, tube, sphere, cone, prism, 3D text, imported files. Any part can be a hole.
+- **Parts:** box, cylinder, tube, sphere, cone, prism, 3D text, sketches, imported files. Any part can be a hole.
+- **Sketch:** draw closed outlines with lines, rectangles and circles (or type exact lengths and angles), bend any side into an arc, round the corners, then Extrude (push up) or Revolve (spin around the center line). Outlines inside another outline become holes. Sketches stay editable (`src/builder/SketchEditor.jsx`, `src/cad/sketch.js`).
 - **Handles:** Move, Rotate and Resize (drag a handle to stretch one direction; it changes the part's real sizes). Snap steps for moving and turning.
 - **Selection:** Shift/Ctrl-click to select several; they move and rotate together. Group (Ctrl+G) so one click selects them all.
 - **Arrange:** align, mirror (X/Y/Z), resize by percent, repeat in a line or a circle.
-- **Edges:** rounded (fillet) or beveled (chamfer) edges on boxes, cylinders, tubes, cones and prisms.
+- **Edges:** rounded (fillet) or beveled (chamfer) edges on boxes, cylinders, tubes, cones, prisms and sketches.
 - **Measure:** click two points for the distance and its X/Y/Z parts.
 - **Units:** mm, cm or inches for everything on screen. Files are always saved in mm.
 

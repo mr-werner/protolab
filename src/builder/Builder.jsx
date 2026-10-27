@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import Viewport, { geometryFromData } from "./Viewport.jsx";
 import Inspector from "./Inspector.jsx";
 import MultiPanel from "./MultiPanel.jsx";
+import SketchEditor from "./SketchEditor.jsx";
 import { UNITS, fmtLen, snapLabel } from "../units.js";
 import { alignParts, mirrorParts, linearRepeat, circularRepeat, resizePart } from "./transforms.js";
 import { cad } from "../cad/client.js";
@@ -88,6 +89,7 @@ function featureWarnings(objects, unit) {
       cone: [Math.max(p.d1, p.d2), p.h],
       polygon: [p.d, p.h],
       text: [p.depth],
+      sketch: p.op === "revolve" ? [] : [p.height],
     }[o.type] || [];
     const min = Math.min(...dims) * k;
     if (min < MIN_FEATURE_MM) out.push(`${o.name} is ${fmtLen(min, unit)} ${unit} thick in places. Parts under ${fmtLen(MIN_FEATURE_MM, unit)} ${unit} may not print.`);
@@ -285,6 +287,19 @@ export default function Builder() {
       const x = Math.min(bounds.max.x + 30, BUILD_VOLUME.x / 2 - 30);
       obj.position = [Math.round(x), 0, 0];
     }
+    commit((list) => [...list, obj]);
+    setSelectedId(obj.id);
+    setMode("move");
+  };
+
+  // Sketch editor: null when closed, { id: null } for a new sketch.
+  const [sketchEdit, setSketchEdit] = useState(null);
+  const finishSketch = (params, rotation) => {
+    const id = sketchEdit?.id;
+    setSketchEdit(null);
+    if (id) return updateObject(id, { params: { ...objects.find((o) => o.id === id).params, ...params } });
+    const obj = makeObject("sketch", { name: "Sketch", params, rotation: rotation || [0, 0, 0] });
+    if (bounds) obj.position = [Math.round(Math.min(bounds.max.x + 30, BUILD_VOLUME.x / 2 - 30)), 0, 0];
     commit((list) => [...list, obj]);
     setSelectedId(obj.id);
     setMode("move");
@@ -516,6 +531,7 @@ export default function Builder() {
   // Keyboard shortcuts.
   useEffect(() => {
     const onKey = (e) => {
+      if (sketchEdit) return;
       const tag = e.target.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const mod = e.metaKey || e.ctrlKey;
@@ -550,7 +566,7 @@ export default function Builder() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duplicate, remove, selectedIds, objects, bounds]);
+  }, [duplicate, remove, selectedIds, objects, bounds, sketchEdit]);
 
   // Frame the design once its first shapes are in.
   const framed = useRef(false);
@@ -645,6 +661,10 @@ export default function Builder() {
                 <span>{def.label}</span>
               </button>
             ))}
+            <button onClick={() => setSketchEdit({ id: null })} disabled={engineState !== "ready"} title="Draw your own outline, then extrude or revolve it">
+              <ShapeIcon type="sketch" />
+              <span>Sketch</span>
+            </button>
           </div>
         </section>
         <section className="b-parts">
@@ -785,6 +805,7 @@ export default function Builder() {
             onChange={(patch, key) => updateObject(selected.id, patch, key)}
             onDuplicate={duplicate}
             onDelete={remove}
+            onEditSketch={() => setSketchEdit({ id: selected.id })}
             onClose={() => setSelectedId(null)}
           />
         ) : selectedIds.length > 1 ? (
@@ -961,6 +982,16 @@ export default function Builder() {
             )}
           </div>
         </div>
+      )}
+      {sketchEdit && (
+        <SketchEditor
+          initial={sketchEdit.id ? objects.find((o) => o.id === sketchEdit.id)?.params : null}
+          isNew={!sketchEdit.id}
+          unit={unit}
+          snapStep={snapStep}
+          onCancel={() => setSketchEdit(null)}
+          onDone={finishSketch}
+        />
       )}
     </div>
   );

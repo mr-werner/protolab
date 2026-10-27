@@ -10,6 +10,7 @@ import {
   drawRoundedRectangle,
 } from "replicad";
 import { EDGE_TYPES } from "../objects.js";
+import { buildSketchSolid } from "./sketch.js";
 
 const EPS = 0.01;
 
@@ -66,6 +67,8 @@ function buildBase(obj, fonts) {
       return cone(p.d1, p.d2, p.h);
     case "polygon":
       return drawPolysides(p.d / 2, Math.round(p.sides)).sketchOnPlane("XY").extrude(p.h);
+    case "sketch":
+      return buildSketchSolid(p);
     case "text": {
       const family = fonts.has(p.font) ? p.font : fonts.values().next().value;
       const text = (p.text || "").trim() || "Text";
