@@ -13,6 +13,16 @@ A 3D builder that runs in the browser. People start from a template or their own
 - **Design model:** a flat list of parts (`src/objects.js`). Each part has a type, sizes in mm, a position, a rotation (applied X, then Y, then Z), and a Solid/Hole flag. Solids are joined, then holes are cut from them.
 - **Templates:** `src/templates.js`. Thumbnails in `public/templates/` are rendered from the builder itself.
 
+## Builder tools
+
+- **Parts:** box, cylinder, tube, sphere, cone, prism, 3D text, imported files. Any part can be a hole.
+- **Handles:** Move, Rotate and Resize (drag a handle to stretch one direction; it changes the part's real sizes). Snap steps for moving and turning.
+- **Selection:** Shift/Ctrl-click to select several; they move and rotate together. Group (Ctrl+G) so one click selects them all.
+- **Arrange:** align, mirror (X/Y/Z), resize by percent, repeat in a line or a circle.
+- **Edges:** rounded (fillet) or beveled (chamfer) edges on boxes, cylinders, tubes, cones and prisms.
+- **Measure:** click two points for the distance and its X/Y/Z parts.
+- **Units:** mm, cm or inches for everything on screen. Files are always saved in mm.
+
 ## Placeholder settings (`src/config.js`)
 
 These are stand-ins until the real decisions are made:

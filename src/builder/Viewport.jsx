@@ -68,27 +68,34 @@ export function geometryFromData(data) {
   return toGeometry(data);
 }
 
+
 // The 3D view. `objects` and `geometries` drive what is shown; the parent gets
-// selection changes and gizmo edits through the callbacks.
+// selection changes, gizmo edits and measurements through the callbacks.
 export default function Viewport({
   objects,
   geometries,
-  selectedId,
+  selectedIds,
   color,
   mode,
+  snap,
+  rotateSnap,
   combined,
   showCombined,
   outOfBounds,
+  measureLabel,
   onSelect,
   onTransform,
   onTransformEnd,
+  onResizeEnd,
+  onMeasure,
   onBounds,
   apiRef,
 }) {
   const hostRef = useRef(null);
+  const labelRef = useRef(null);
   const state = useRef(null);
   const props = useRef({});
-  props.current = { onSelect, onTransform, onTransformEnd, onBounds };
+  props.current = { onSelect, onTransform, onTransformEnd, onResizeEnd, onMeasure, onBounds, mode };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -115,7 +122,8 @@ export default function Viewport({
     fill.position.set(-250, 200, 120);
     scene.add(fill);
 
-    scene.add(makePlate());
+    const plate = makePlate();
+    scene.add(plate);
     const volume = makeVolume();
     scene.add(volume);
 
@@ -126,30 +134,104 @@ export default function Viewport({
     orbit.maxDistance = 1600;
     orbit.update();
 
+    // Several selected parts move together through this pivot.
+    const pivot = new THREE.Object3D();
+    scene.add(pivot);
+    let dragStart = null; // { pivot: Matrix4, parts: Map<id, Matrix4> }
+
     const gizmo = new TransformControls(camera, renderer.domElement);
-    gizmo.setTranslationSnap(1);
-    gizmo.setRotationSnap(15 * DEG);
     gizmo.setSize(0.9);
     const gizmoHelper = gizmo.getHelper ? gizmo.getHelper() : gizmo;
     scene.add(gizmoHelper);
-    gizmo.addEventListener("dragging-changed", (e) => {
-      orbit.enabled = !e.value;
-      if (!e.value && gizmo.object) props.current.onTransformEnd?.();
-    });
-    gizmo.addEventListener("objectChange", () => {
-      const m = gizmo.object;
-      if (!m) return;
-      props.current.onTransform?.(m.userData.id, {
-        position: m.position.toArray().map((v) => Math.round(v * 100) / 100),
-        rotation: [m.rotation.x, m.rotation.y, m.rotation.z].map((r) => Math.round((r / DEG) * 100) / 100),
-      });
-    });
 
     const meshes = new Map();
+    const round = (v, n = 100) => Math.round(v * n) / n;
+    const partInfo = (m) => ({
+      position: m.position.toArray().map((v) => round(v)),
+      rotation: [m.rotation.x, m.rotation.y, m.rotation.z].map((r) => round(r / DEG)),
+    });
+
+    gizmo.addEventListener("dragging-changed", (e) => {
+      orbit.enabled = !e.value;
+      const target = gizmo.object;
+      if (!target) return;
+      if (e.value) {
+        target.updateMatrixWorld(true);
+        dragStart = { pivot: target.matrixWorld.clone(), scale: target.scale.clone(), parts: new Map() };
+        if (target === pivot) for (const id of state.current.selection) dragStart.parts.set(id, meshes.get(id).matrixWorld.clone());
+        return;
+      }
+      if (props.current.mode === "scale" && target !== pivot && dragStart) {
+        const f = [0, 1, 2].map((k) => Math.abs(target.scale.getComponent(k) / dragStart.scale.getComponent(k)));
+        target.scale.copy(dragStart.scale);
+        if (f.some((v) => Math.abs(v - 1) > 0.001)) props.current.onResizeEnd?.(target.userData.id, f);
+      } else {
+        props.current.onTransformEnd?.();
+      }
+      dragStart = null;
+    });
+    gizmo.addEventListener("objectChange", () => {
+      const target = gizmo.object;
+      if (!target || props.current.mode === "scale") return;
+      if (target !== pivot) {
+        props.current.onTransform?.({ [target.userData.id]: partInfo(target) });
+        return;
+      }
+      if (!dragStart) return;
+      pivot.updateMatrixWorld(true);
+      const delta = pivot.matrixWorld.clone().multiply(dragStart.pivot.clone().invert());
+      const patch = {};
+      for (const [id, start] of dragStart.parts) {
+        const mesh = meshes.get(id);
+        if (!mesh) continue;
+        const m = delta.clone().multiply(start);
+        const pos = new THREE.Vector3();
+        const quat = new THREE.Quaternion();
+        const scl = new THREE.Vector3();
+        m.decompose(pos, quat, scl);
+        // A mirrored part has a negative X scale baked into the matrix.
+        if (mesh.userData.mirror) {
+          const fixed = m.clone().multiply(new THREE.Matrix4().makeScale(-1, 1, 1));
+          fixed.decompose(pos, quat, scl);
+        }
+        const e = new THREE.Euler().setFromQuaternion(quat, "ZYX");
+        patch[id] = { position: pos.toArray().map((v) => round(v)), rotation: [e.x, e.y, e.z].map((r) => round(r / DEG)) };
+      }
+      props.current.onTransform?.(patch);
+    });
+
     const combinedMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05 }));
     combinedMesh.castShadow = true;
     combinedMesh.visible = false;
     scene.add(combinedMesh);
+
+    // Measuring: two clicked points, a line between them and a label.
+    const measure = new THREE.Group();
+    const dotGeo = new THREE.SphereGeometry(1, 16, 12);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffd23f, depthTest: false });
+    const dots = [new THREE.Mesh(dotGeo, dotMat), new THREE.Mesh(dotGeo, dotMat)];
+    dots.forEach((d) => {
+      d.renderOrder = 10;
+      d.visible = false;
+      measure.add(d);
+    });
+    const measureLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: 0xffd23f, depthTest: false })
+    );
+    measureLine.renderOrder = 10;
+    measureLine.visible = false;
+    measure.add(measureLine);
+    scene.add(measure);
+    let points = [];
+    const showMeasure = () => {
+      dots.forEach((d, i) => {
+        d.visible = !!points[i];
+        if (points[i]) d.position.copy(points[i]);
+      });
+      measureLine.visible = points.length === 2;
+      if (points.length === 2) measureLine.geometry.setFromPoints(points);
+    };
 
     const resize = () => {
       const w = host.clientWidth;
@@ -171,21 +253,41 @@ export default function Viewport({
       const rect = renderer.domElement.getBoundingClientRect();
       const p = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
       ray.setFromCamera(p, camera);
+      if (props.current.mode === "measure") {
+        const targets = [...meshes.values()].filter((m) => m.visible);
+        if (combinedMesh.visible) targets.push(combinedMesh);
+        targets.push(plate.children[0]);
+        const hit = ray.intersectObjects(targets, false)[0];
+        if (!hit) return;
+        points = points.length >= 2 ? [hit.point.clone()] : [...points, hit.point.clone()];
+        showMeasure();
+        props.current.onMeasure?.(points.length === 2 ? points.map((v) => v.toArray()) : points.length ? "first" : null);
+        return;
+      }
       const hits = ray.intersectObjects([...meshes.values()].filter((m) => m.visible), false);
-      props.current.onSelect?.(hits.length ? hits[0].object.userData.id : null);
+      props.current.onSelect?.(hits.length ? hits[0].object.userData.id : null, e.shiftKey || e.ctrlKey || e.metaKey);
     };
     renderer.domElement.addEventListener("pointerdown", onDown);
     renderer.domElement.addEventListener("pointerup", onUp);
 
     let raf;
+    const tmp = new THREE.Vector3();
     const loop = () => {
       orbit.update();
       renderer.render(scene, camera);
+      const label = labelRef.current;
+      if (label) {
+        if (points.length === 2 && label.textContent) {
+          tmp.copy(points[0]).add(points[1]).multiplyScalar(0.5).project(camera);
+          label.style.display = "block";
+          label.style.transform = `translate(-50%, -130%) translate(${((tmp.x + 1) / 2) * host.clientWidth}px, ${((1 - tmp.y) / 2) * host.clientHeight}px)`;
+        } else label.style.display = "none";
+      }
       raf = requestAnimationFrame(loop);
     };
     loop();
 
-    state.current = { renderer, scene, camera, orbit, gizmo, meshes, combinedMesh, volume };
+    state.current = { renderer, scene, camera, orbit, gizmo, meshes, combinedMesh, volume, pivot, selection: [], clearMeasure: () => ((points = []), showMeasure()) };
 
     if (apiRef) {
       apiRef.current = {
@@ -198,6 +300,18 @@ export default function Viewport({
           camera.position.copy(center).addScaledVector(dir, (size * 1.6) / Math.min(1, camera.aspect * 1.1));
           orbit.update();
         },
+        // World-space boxes of the given parts.
+        boxes(ids) {
+          const out = new Map();
+          for (const id of ids) {
+            const m = meshes.get(id);
+            if (!m || !m.geometry.attributes.position) continue;
+            m.updateMatrixWorld(true);
+            out.set(id, new THREE.Box3().setFromObject(m, true));
+          }
+          return out;
+        },
+        clearMeasure: () => state.current.clearMeasure(),
         snapshot: () => renderer.domElement.toDataURL("image/png"),
       };
     }
@@ -219,8 +333,10 @@ export default function Viewport({
   useEffect(() => {
     const s = state.current;
     if (!s) return;
+    const selected = new Set(selectedIds);
     const seen = new Set();
     const solidColor = new THREE.Color(color);
+    const dragging = s.gizmo.dragging;
     for (const obj of objects) {
       seen.add(obj.id);
       const geom = geometries.get(obj.geomKey);
@@ -244,18 +360,23 @@ export default function Viewport({
         mesh.userData.edges = edges;
       }
       mesh.visible = !obj.hidden && !!geom && !showCombined;
-      if (!s.gizmo.dragging || s.gizmo.object !== mesh) {
+      mesh.userData.mirror = !!obj.mirror;
+      const beingDragged = dragging && (s.gizmo.object === mesh || (s.gizmo.object === s.pivot && selected.has(obj.id)));
+      if (!beingDragged || s.gizmo.object === s.pivot) {
         mesh.position.fromArray(obj.position);
         mesh.rotation.set(obj.rotation[0] * DEG, obj.rotation[1] * DEG, obj.rotation[2] * DEG, "ZYX");
       }
       mesh.rotation.order = "ZYX";
-      mesh.scale.setScalar(obj.scale || 1);
+      if (!(dragging && mode === "scale" && s.gizmo.object === mesh)) {
+        const k = obj.scale || 1;
+        mesh.scale.set(obj.mirror ? -k : k, k, k);
+      }
       const mat = mesh.material;
-      const selected = obj.id === selectedId;
+      const isSel = selected.has(obj.id);
       if (obj.hole) {
-        mat.color.set(selected ? 0xff9d7a : 0xb9c3cc);
+        mat.color.set(isSel ? 0xff9d7a : 0xb9c3cc);
         mat.transparent = true;
-        mat.opacity = selected ? 0.45 : 0.3;
+        mat.opacity = isSel ? 0.45 : 0.3;
         mat.depthWrite = false;
         mat.emissive.set(0x000000);
         mesh.castShadow = false;
@@ -264,7 +385,7 @@ export default function Viewport({
         mat.transparent = false;
         mat.opacity = 1;
         mat.depthWrite = true;
-        mat.emissive.set(selected ? 0x3a1a08 : 0x000000);
+        mat.emissive.set(isSel ? 0x3a1a08 : 0x000000);
         mesh.castShadow = true;
       }
       mat.roughness = 0.55;
@@ -280,13 +401,38 @@ export default function Viewport({
       }
     }
 
-    // Gizmo follows the selection.
-    const selectedMesh = selectedId ? s.meshes.get(selectedId) : null;
-    if (selectedMesh && selectedMesh.visible && !showCombined) {
-      if (s.gizmo.object !== selectedMesh) s.gizmo.attach(selectedMesh);
-    } else if (s.gizmo.object) s.gizmo.detach();
-    s.gizmo.setMode(mode === "rotate" ? "rotate" : "translate");
-    s.gizmo.setSpace(mode === "rotate" ? "local" : "world");
+    // Gizmo: on the part itself for one selection, on a pivot for several.
+    s.selection = selectedIds.filter((id) => s.meshes.get(id)?.visible);
+    const measuring = mode === "measure";
+    if (!dragging) {
+      if (!s.selection.length || showCombined || measuring) {
+        if (s.gizmo.object) s.gizmo.detach();
+      } else if (s.selection.length === 1) {
+        const m = s.meshes.get(s.selection[0]);
+        if (s.gizmo.object !== m) s.gizmo.attach(m);
+      } else {
+        const box = new THREE.Box3();
+        for (const id of s.selection) {
+          const m = s.meshes.get(id);
+          m.updateMatrixWorld(true);
+          box.expandByObject(m, true);
+        }
+        const c = box.getCenter(new THREE.Vector3());
+        s.pivot.position.set(c.x, c.y, box.min.z);
+        s.pivot.rotation.set(0, 0, 0);
+        s.pivot.scale.set(1, 1, 1);
+        s.pivot.updateMatrixWorld(true);
+        if (s.gizmo.object !== s.pivot) s.gizmo.attach(s.pivot);
+      }
+    }
+    const multi = s.selection.length > 1;
+    const gizmoMode = mode === "rotate" ? "rotate" : mode === "scale" && !multi ? "scale" : "translate";
+    s.gizmo.setMode(gizmoMode);
+    s.gizmo.setSpace(gizmoMode === "translate" ? "world" : "local");
+    s.gizmo.setTranslationSnap(snap || null);
+    s.gizmo.setRotationSnap(rotateSnap ? rotateSnap * DEG : null);
+    s.gizmo.setScaleSnap(null);
+    if (!measuring) s.clearMeasure();
 
     // Combined result preview.
     s.combinedMesh.visible = !!(showCombined && combined);
@@ -310,7 +456,13 @@ export default function Viewport({
       box.expandByObject(mesh, true);
     }
     props.current.onBounds?.(box.isEmpty() ? null : box);
-  }, [objects, geometries, selectedId, color, mode, combined, showCombined, outOfBounds]);
+  }, [objects, geometries, selectedIds, color, mode, snap, rotateSnap, combined, showCombined, outOfBounds]);
 
-  return <div className="viewport" ref={hostRef} />;
+  return (
+    <div className="viewport" ref={hostRef}>
+      <div className="b-measure-label" ref={labelRef}>
+        {measureLabel}
+      </div>
+    </div>
+  );
 }

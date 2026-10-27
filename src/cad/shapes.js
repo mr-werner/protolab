@@ -9,6 +9,7 @@ import {
   drawText,
   drawRoundedRectangle,
 } from "replicad";
+import { EDGE_TYPES } from "../objects.js";
 
 const EPS = 0.01;
 
@@ -25,7 +26,23 @@ function cone(bottomD, topD, h) {
   return base.loftWith(top);
 }
 
+
+// Rounds (fillet) or bevels (chamfer) every edge of the part.
+function finishEdges(shape, p) {
+  if (!p.edge || p.edge <= 0 || !p.edgeStyle || p.edgeStyle === "none") return shape;
+  try {
+    return p.edgeStyle === "bevel" ? shape.chamfer(p.edge) : shape.fillet(p.edge);
+  } catch {
+    throw new Error("The edge size is too big for this part. Try a smaller value.");
+  }
+}
+
 export function buildShape(obj, fonts) {
+  const shape = buildBase(obj, fonts);
+  return EDGE_TYPES.has(obj.type) ? finishEdges(shape, obj.params) : shape;
+}
+
+function buildBase(obj, fonts) {
   const p = obj.params;
   switch (obj.type) {
     case "box": {
@@ -60,11 +77,12 @@ export function buildShape(obj, fonts) {
   }
 }
 
-// Applies the object's placement: rotate about X, then Y, then Z (degrees), then move.
+// Applies the object's placement: mirror (local X) and scale, then rotate about X, then Y, then Z (degrees), then move.
 export function place(shape, obj) {
   const [rx, ry, rz] = obj.rotation;
   const [x, y, z] = obj.position;
   let s = shape;
+  if (obj.mirror) s = s.mirror("YZ", [0, 0, 0]);
   if (obj.scale && obj.scale !== 1) s = s.scale(obj.scale, [0, 0, 0]);
   if (rx) s = s.rotate(rx, [0, 0, 0], [1, 0, 0]);
   if (ry) s = s.rotate(ry, [0, 0, 0], [0, 1, 0]);

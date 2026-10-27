@@ -1,67 +1,11 @@
-import { useEffect, useState } from "react";
-import { SHAPES } from "../objects.js";
+import { SHAPES, EDGE_TYPES } from "../objects.js";
 import { FONTS } from "../config.js";
+import { NumberField, Triple, ArrangeTools } from "./fields.jsx";
 
-function NumberField({ label, value, min, max, step = 0.5, unit = "mm", slider = true, onChange }) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const commit = (raw) => {
-    const n = parseFloat(raw);
-    if (!Number.isFinite(n)) return;
-    onChange(Math.min(max, Math.max(min, n)));
-  };
-  return (
-    <label className="f-num">
-      <span className="f-label">{label}</span>
-      {slider && (
-        <input type="range" min={min} max={max} step={step} value={Math.min(max, Math.max(min, value))} onChange={(e) => onChange(parseFloat(e.target.value))} />
-      )}
-      <span className="f-box">
-        <input
-          type="number"
-          inputMode="decimal"
-          value={draft}
-          min={min}
-          max={max}
-          step={step}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            commit(e.target.value);
-          }}
-          onBlur={() => setDraft(String(value))}
-        />
-        <em>{unit}</em>
-      </span>
-    </label>
-  );
-}
-
-function Triple({ label, values, unit, step, min, max, onChange }) {
-  return (
-    <fieldset className="f-triple">
-      <legend>{label}</legend>
-      {["X", "Y", "Z"].map((axis, i) => (
-        <label key={axis}>
-          <span className={`axis ${axis.toLowerCase()}`}>{axis}</span>
-          <NumberField
-            label=""
-            value={values[i]}
-            min={min}
-            max={max}
-            step={step}
-            unit={unit}
-            slider={false}
-            onChange={(v) => onChange(values.map((x, j) => (j === i ? v : x)), axis)}
-          />
-        </label>
-      ))}
-    </fieldset>
-  );
-}
-
-export default function Inspector({ object, importInfo, error, onChange, onDuplicate, onDelete, onClose }) {
+export default function Inspector({ object, importInfo, error, unit, ops, onChange, onDuplicate, onDelete, onClose }) {
   const def = SHAPES[object.type];
   const setParam = (key, value) => onChange({ params: { ...object.params, [key]: value } }, `p.${key}`);
+  const edgeStyle = object.params.edgeStyle || "none";
 
   return (
     <div className="b-insp">
@@ -102,7 +46,16 @@ export default function Inspector({ object, importInfo, error, onChange, onDupli
           </>
         )}
         {def?.fields.map(([key, label, min, max, step]) => (
-          <NumberField key={key} label={label} value={object.params[key]} min={min} max={max} step={step || 0.5} unit={key === "sides" ? "" : "mm"} onChange={(v) => setParam(key, v)} />
+          <NumberField
+            key={key}
+            label={label}
+            value={object.params[key]}
+            min={min}
+            max={max}
+            step={key === "sides" ? step : undefined}
+            unit={key === "sides" ? "" : unit}
+            onChange={(v) => setParam(key, v)}
+          />
         ))}
         {object.type === "import" && (
           <>
@@ -123,9 +76,31 @@ export default function Inspector({ object, importInfo, error, onChange, onDupli
         )}
       </section>
 
+      {EDGE_TYPES.has(object.type) && (
+        <section>
+          <h3>Edges</h3>
+          <div className="b-seg wide small" role="group" aria-label="Edge style">
+            {[
+              ["none", "Sharp"],
+              ["round", "Rounded"],
+              ["bevel", "Beveled"],
+            ].map(([v, l]) => (
+              <button
+                key={v}
+                className={edgeStyle === v ? "on" : ""}
+                onClick={() => onChange({ params: { ...object.params, edgeStyle: v, edge: object.params.edge || 1 } })}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+          {edgeStyle !== "none" && <NumberField label="Edge size" value={object.params.edge || 1} min={0.2} max={40} unit={unit} onChange={(v) => setParam("edge", v)} />}
+        </section>
+      )}
+
       <section>
         <h3>Position</h3>
-        <Triple label="Move" values={object.position} unit="mm" step={1} min={-500} max={500} onChange={(v, a) => onChange({ position: v }, `pos.${a}`)} />
+        <Triple label="Move" values={object.position} unit={unit} min={-500} max={500} onChange={(v, a) => onChange({ position: v }, `pos.${a}`)} />
         <Triple label="Rotate" values={object.rotation} unit="°" step={15} min={-360} max={360} onChange={(v, a) => onChange({ rotation: v }, `rot.${a}`)} />
         <div className="b-row">
           <button className="b-btn small ghost" onClick={() => onChange({ rotation: [0, 0, 0] })}>
@@ -136,6 +111,8 @@ export default function Inspector({ object, importInfo, error, onChange, onDupli
           </button>
         </div>
       </section>
+
+      <ArrangeTools unit={unit} ops={ops} />
 
       <div className="b-row end">
         <button className="b-btn small" onClick={onDuplicate} title="Duplicate (Ctrl+D)">

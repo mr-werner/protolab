@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import Viewport, { geometryFromData } from "./Viewport.jsx";
 import Inspector from "./Inspector.jsx";
+import MultiPanel from "./MultiPanel.jsx";
+import { UNITS, fmtLen, snapLabel } from "../units.js";
+import { alignParts, mirrorParts, linearRepeat, circularRepeat, resizePart } from "./transforms.js";
 import { cad } from "../cad/client.js";
 import { SHAPES, makeObject, newId } from "../objects.js";
 import { TEMPLATES } from "../templates.js";
@@ -9,6 +12,15 @@ import { ShapeIcon } from "./icons.jsx";
 import "./builder.css";
 
 const STORAGE_KEY = "protolab:design:v1";
+const PREFS_KEY = "protolab:prefs:v1";
+
+function loadPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
 
 const geomKeyOf = (o) => (o.type === "import" ? `import:${o.params.importId}` : `${o.type}:${JSON.stringify(o.params)}`);
 
@@ -62,7 +74,7 @@ function startingDesign() {
   return { objects: TEMPLATES[0].build(), name: TEMPLATES[0].name };
 }
 
-function featureWarnings(objects) {
+function featureWarnings(objects, unit) {
   const out = [];
   for (const o of objects) {
     if (o.hole || o.hidden || o.type === "import") continue;
@@ -78,8 +90,8 @@ function featureWarnings(objects) {
       text: [p.depth],
     }[o.type] || [];
     const min = Math.min(...dims) * k;
-    if (min < MIN_FEATURE_MM) out.push(`${o.name} is ${min.toFixed(1)} mm thick in places. Parts under ${MIN_FEATURE_MM} mm may not print.`);
-    if (o.type === "text" && p.size * k < 5) out.push(`${o.name}: letters under 5 mm tall can lose detail.`);
+    if (min < MIN_FEATURE_MM) out.push(`${o.name} is ${fmtLen(min, unit)} ${unit} thick in places. Parts under ${fmtLen(MIN_FEATURE_MM, unit)} ${unit} may not print.`);
+    if (o.type === "text" && p.size * k < 5) out.push(`${o.name}: letters under ${fmtLen(5, unit)} ${unit} tall can lose detail.`);
   }
   return out;
 }
@@ -114,8 +126,15 @@ export default function Builder() {
   const objects = hist.present;
   const [name, setName] = useState(initial.name || "My design");
   const [color, setColor] = useState(initial.color || COLORS[4].value);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const setSelectedId = useCallback((id) => setSelectedIds(id ? [id] : []), []);
+  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const [mode, setMode] = useState("move");
+  const prefs = useMemo(loadPrefs, []);
+  const [unit, setUnit] = useState(UNITS[prefs.unit] ? prefs.unit : "mm");
+  const [snapStep, setSnapStep] = useState(prefs.snap ?? 1); // in display units
+  const [rotateSnap, setRotateSnap] = useState(prefs.rotateSnap ?? 15);
+  const [measure, setMeasure] = useState(null);
   const [geometries, setGeometries] = useState(() => new Map());
   const [engineState, setEngineState] = useState("loading"); // loading | ready | error
   const [busy, setBusy] = useState("");
@@ -134,6 +153,27 @@ export default function Builder() {
 
   const decorated = useMemo(() => objects.map((o) => ({ ...o, geomKey: geomKeyOf(o) })), [objects]);
   const selected = decorated.find((o) => o.id === selectedId) || null;
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ unit, snap: snapStep, rotateSnap }));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [unit, snapStep, rotateSnap]);
+
+  useEffect(() => {
+    if (mode !== "measure") setMeasure(null);
+  }, [mode]);
+
+  // Keep the selection pointing at parts that still exist (after undo, delete...).
+  useEffect(() => {
+    setSelectedIds((ids) => {
+      const alive = ids.filter((id) => objects.some((o) => o.id === id));
+      return alive.length === ids.length ? ids : alive;
+    });
+  }, [objects]);
 
   const flash = useCallback((text, tone = "info") => {
     setNotice({ text, tone, at: Date.now() });
@@ -218,7 +258,7 @@ export default function Builder() {
     : null;
   const tooBig = size && (size[0] > BUILD_VOLUME.x + tol || size[1] > BUILD_VOLUME.y + tol || size[2] > BUILD_VOLUME.z + tol);
   const outOfBounds = !!outside && (outside.x || outside.y || outside.z || outside.below);
-  const warnings = useMemo(() => featureWarnings(objects), [objects]);
+  const warnings = useMemo(() => featureWarnings(objects, unit), [objects, unit]);
   const floating = bounds && bounds.min.z > tol;
   const price = size && !tooBig ? estimatePrice(size) : null;
   const hasSolids = objects.some((o) => !o.hole && !o.hidden);
@@ -251,18 +291,86 @@ export default function Builder() {
   };
 
   const duplicate = useCallback(() => {
-    if (!selected) return;
-    const { geomKey, ...plain } = selected;
-    const copy = { ...structuredClone(plain), id: newId(), name: `${plain.name} copy`, position: [plain.position[0] + 10, plain.position[1] + 10, plain.position[2]] };
-    commit((list) => [...list, copy]);
-    setSelectedId(copy.id);
-  }, [selected, commit]);
+    if (!selectedIds.length) return;
+    const groupMap = new Map();
+    const copies = objects
+      .filter((o) => selectedSet.has(o.id))
+      .map((o) => {
+        if (o.group && !groupMap.has(o.group)) groupMap.set(o.group, newId());
+        return {
+          ...structuredClone(o),
+          id: newId(),
+          group: o.group ? groupMap.get(o.group) : null,
+          name: selectedIds.length === 1 ? `${o.name} copy` : o.name,
+          position: [o.position[0] + 10, o.position[1] + 10, o.position[2]],
+        };
+      });
+    commit((list) => [...list, ...copies]);
+    setSelectedIds(copies.map((c) => c.id));
+  }, [selectedIds, selectedSet, objects, commit]);
 
   const remove = useCallback(() => {
-    if (!selected) return;
-    commit((list) => list.filter((o) => o.id !== selected.id));
-    setSelectedId(null);
-  }, [selected, commit]);
+    if (!selectedIds.length) return;
+    commit((list) => list.filter((o) => !selectedSet.has(o.id)));
+    setSelectedIds([]);
+  }, [selectedIds, selectedSet, commit]);
+
+  // Clicking a part selects its whole group; Shift/Ctrl-click adds or removes.
+  const handleSelect = useCallback(
+    (id, additive) => {
+      if (!id) {
+        if (!additive) setSelectedIds([]);
+        return;
+      }
+      const obj = objects.find((o) => o.id === id);
+      const ids = obj?.group ? objects.filter((o) => o.group === obj.group).map((o) => o.id) : [id];
+      setSelectedIds((cur) => {
+        if (!additive) return ids;
+        const has = ids.every((x) => cur.includes(x));
+        return has ? cur.filter((x) => !ids.includes(x)) : [...cur, ...ids.filter((x) => !cur.includes(x))];
+      });
+    },
+    [objects]
+  );
+
+  const selectionBox = () => {
+    const boxes = viewRef.current?.boxes(selectedIds) || new Map();
+    let min = [Infinity, Infinity, Infinity];
+    let max = [-Infinity, -Infinity, -Infinity];
+    for (const b of boxes.values()) {
+      min = min.map((v, k) => Math.min(v, b.min.getComponent(k)));
+      max = max.map((v, k) => Math.max(v, b.max.getComponent(k)));
+    }
+    return { boxes, min, max, center: min.map((v, k) => (v + max[k]) / 2) };
+  };
+
+  const ops = {
+    group: () => {
+      const g = newId();
+      commit((list) => list.map((o) => (selectedSet.has(o.id) ? { ...o, group: g } : o)));
+    },
+    ungroup: () => commit((list) => list.map((o) => (selectedSet.has(o.id) ? { ...o, group: null } : o))),
+    align: (axis, where) => {
+      const { boxes } = selectionBox();
+      commit((list) => alignParts(list, boxes, axis, where));
+    },
+    mirror: (axis) => {
+      const { center } = selectionBox();
+      if (!Number.isFinite(center[axis])) return;
+      commit((list) => mirrorParts(list, selectedIds, axis, center[axis]));
+    },
+    linear: (count, step) => {
+      commit((list) => linearRepeat(list, selectedIds, count, step).list);
+      flash(`Made ${count - 1} ${count - 1 === 1 ? "copy" : "copies"}.`);
+    },
+    circular: (count, angle, center) => {
+      commit((list) => circularRepeat(list, selectedIds, count, angle, center).list);
+      flash(`Made ${count - 1} ${count - 1 === 1 ? "copy" : "copies"} around the circle.`);
+    },
+    setHole: (hole) => commit((list) => list.map((o) => (selectedSet.has(o.id) ? { ...o, hole } : o))),
+    resize: (factor) => commit((list) => list.map((o) => (selectedSet.has(o.id) ? resizePart(o, [factor, factor, factor]) : o))),
+    center: () => selectionBox().center,
+  };
 
   const loadTemplate = (t) => {
     if (objects.length && !window.confirm(`Replace your current design with the ${t.name} template? You can undo this.`)) return;
@@ -301,12 +409,13 @@ export default function Builder() {
   };
 
   const onTransform = useCallback(
-    (id, patch) => {
+    (patches) => {
       if (!dragStart.current) dragStart.current = hist.present;
-      dispatch({ type: "live", update: (list) => list.map((o) => (o.id === id ? { ...o, ...patch } : o)) });
+      dispatch({ type: "live", update: (list) => list.map((o) => (patches[o.id] ? { ...o, ...patches[o.id] } : o)) });
     },
     [hist.present]
   );
+  const onResizeEnd = useCallback((id, factors) => commit((list) => list.map((o) => (o.id === id ? resizePart(o, factors) : o))), [commit]);
   const onTransformEnd = useCallback(() => {
     if (dragStart.current) dispatch({ type: "mark", snapshot: dragStart.current });
     dragStart.current = null;
@@ -419,8 +528,14 @@ export default function Builder() {
       } else if (mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicate();
+      } else if (mod && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        setSelectedIds(objects.map((o) => o.id));
+      } else if (mod && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        if (selectedIds.length > 1) ops.group();
       } else if (e.key === "Delete" || e.key === "Backspace") {
-        if (selected) {
+        if (selectedIds.length) {
           e.preventDefault();
           remove();
         }
@@ -430,11 +545,12 @@ export default function Builder() {
         setExportOpen(false);
       } else if (e.key.toLowerCase() === "m") setMode("move");
       else if (e.key.toLowerCase() === "r") setMode("rotate");
+      else if (e.key.toLowerCase() === "s") setMode("scale");
       else if (e.key.toLowerCase() === "f") viewRef.current?.frame(bounds);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duplicate, remove, selected, bounds]);
+  }, [duplicate, remove, selectedIds, objects, bounds]);
 
   // Frame the design once its first shapes are in.
   const framed = useRef(false);
@@ -445,7 +561,15 @@ export default function Builder() {
     }
   }, [bounds]);
 
-  const fmt = (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
+  const fmt = (v) => fmtLen(v, unit);
+  const u = UNITS[unit].label;
+  const measureLabel = Array.isArray(measure)
+    ? (() => {
+        const d = measure[1].map((v, k) => v - measure[0][k]);
+        const len = Math.hypot(...d);
+        return `${fmtLen(len, unit)} ${u}  (X ${fmtLen(Math.abs(d[0]), unit)} · Y ${fmtLen(Math.abs(d[1]), unit)} · Z ${fmtLen(Math.abs(d[2]), unit)})`;
+      })()
+    : "";
   const colorLabel = COLORS.find((c) => c.value === color)?.label || "Custom";
 
   return (
@@ -528,9 +652,10 @@ export default function Builder() {
           <ul>
             {decorated.map((o) => (
               <li key={o.id}>
-                <button className={`b-part ${o.id === selectedId ? "on" : ""} ${o.hidden ? "dim" : ""}`} onClick={() => setSelectedId(o.id)}>
+                <button className={`b-part ${selectedSet.has(o.id) ? "on" : ""} ${o.hidden ? "dim" : ""}`} onClick={(e) => handleSelect(o.id, e.shiftKey || e.ctrlKey || e.metaKey)}>
                   <span className={`b-dot ${o.hole ? "hole" : ""}`} style={o.hole ? undefined : { background: color }} />
                   <span className="b-part-name">{o.name}</span>
+                  {o.group && <span className="b-tag grp">group</span>}
                   {o.hole && <span className="b-tag">hole</span>}
                   {buildErrors[o.id] && <span className="b-tag err">error</span>}
                 </button>
@@ -546,13 +671,18 @@ export default function Builder() {
           apiRef={viewRef}
           objects={decorated}
           geometries={geometries}
-          selectedId={selectedId}
+          selectedIds={selectedIds}
           color={color}
           mode={mode}
+          snap={snapStep ? snapStep * UNITS[unit].factor : 0}
+          rotateSnap={rotateSnap}
+          measureLabel={measureLabel}
+          onMeasure={setMeasure}
+          onResizeEnd={onResizeEnd}
           combined={combined}
           showCombined={showCombined}
           outOfBounds={outOfBounds}
-          onSelect={setSelectedId}
+          onSelect={handleSelect}
           onTransform={onTransform}
           onTransformEnd={onTransformEnd}
           onBounds={handleBounds}
@@ -565,7 +695,48 @@ export default function Builder() {
             <button className={mode === "rotate" ? "on" : ""} onClick={() => setMode("rotate")} title="Rotate (R)">
               Rotate
             </button>
+            <button className={mode === "scale" ? "on" : ""} onClick={() => setMode("scale")} title="Resize by dragging (S). One part at a time.">
+              Resize
+            </button>
+            <button className={mode === "measure" ? "on" : ""} onClick={() => setMode(mode === "measure" ? "move" : "measure")} title="Click two points to measure">
+              Measure
+            </button>
           </div>
+          <label className="b-select" title="Snap moves to this step">
+            <span>Snap</span>
+            <select value={snapStep} onChange={(e) => setSnapStep(parseFloat(e.target.value))}>
+              {UNITS[unit].snaps.map((v) => (
+                <option key={v} value={v}>
+                  {snapLabel(v, unit)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="b-select" title="Snap rotation to this angle">
+            <span>Turn</span>
+            <select value={rotateSnap} onChange={(e) => setRotateSnap(parseFloat(e.target.value))}>
+              {[0, 1, 5, 15, 45, 90].map((v) => (
+                <option key={v} value={v}>
+                  {v ? `${v}°` : "Free"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="b-select" title="Units for every size on screen">
+            <span>Units</span>
+            <select
+              value={unit}
+              onChange={(e) => {
+                const next = e.target.value;
+                setUnit(next);
+                setSnapStep(UNITS[next].snaps[2]);
+              }}
+            >
+              <option value="mm">mm</option>
+              <option value="cm">cm</option>
+              <option value="in">inches</option>
+            </select>
+          </label>
           <button className={`b-chip ${showCombined ? "on" : ""}`} onClick={runPreview} disabled={!hasSolids || engineState !== "ready"}>
             {showCombined ? "Back to editing" : "Preview result"}
           </button>
@@ -575,11 +746,11 @@ export default function Builder() {
         </div>
         <div className="b-size" aria-live="polite">
           <span>
-            Build area {BUILD_VOLUME.x} × {BUILD_VOLUME.y} × {BUILD_VOLUME.z} mm
+            Build area {fmt(BUILD_VOLUME.x)} × {fmt(BUILD_VOLUME.y)} × {fmt(BUILD_VOLUME.z)} {u}
           </span>
           {size && (
             <strong className={outOfBounds ? "bad" : ""}>
-              Design {fmt(size[0])} × {fmt(size[1])} × {fmt(size[2])} mm
+              Design {fmt(size[0])} × {fmt(size[1])} × {fmt(size[2])} {u}
             </strong>
           )}
         </div>
@@ -597,6 +768,9 @@ export default function Builder() {
           </div>
         )}
         {notice && <div className={`b-notice ${notice.tone}`}>{notice.text}</div>}
+        {mode === "measure" && !Array.isArray(measure) && (
+          <div className="b-tip">{measure === "first" ? "Now click the second point." : "Click the first point to measure from."}</div>
+        )}
       </main>
 
       <aside className="b-right">
@@ -606,15 +780,28 @@ export default function Builder() {
             object={selected}
             importInfo={selected.type === "import" ? importsRef.current.get(selected.params.importId) : null}
             error={buildErrors[selected.id]}
+            unit={unit}
+            ops={ops}
             onChange={(patch, key) => updateObject(selected.id, patch, key)}
             onDuplicate={duplicate}
             onDelete={remove}
             onClose={() => setSelectedId(null)}
           />
+        ) : selectedIds.length > 1 ? (
+          <MultiPanel
+            count={selectedIds.length}
+            grouped={new Set(objects.filter((o) => selectedSet.has(o.id)).map((o) => o.group || o.id)).size === 1}
+            unit={unit}
+            ops={ops}
+            onDuplicate={duplicate}
+            onDelete={remove}
+            onClose={() => setSelectedIds([])}
+          />
         ) : (
           <div className="b-insp-empty">
             <h2>Select a part to edit it</h2>
-            <p>Click a shape in the view or in the parts list. Drag the arrows to move it, or switch to Rotate.</p>
+            <p>Click a shape in the view or in the parts list. Shift-click to select more than one.</p>
+            <p className="b-hint">Move, Rotate and Resize switch the handles on the selected part. Measure: click two points.</p>
             <p className="b-hint">Holes cut through any solid they touch. Turn any shape into a hole from its settings.</p>
           </div>
         )}
@@ -634,7 +821,11 @@ export default function Builder() {
                   Center on plate
                 </button>
               )}
-              {tooBig && <p className="b-hint">Make it smaller: the largest size is {BUILD_VOLUME.x} × {BUILD_VOLUME.y} × {BUILD_VOLUME.z} mm.</p>}
+              {tooBig && (
+                <p className="b-hint">
+                  Make it smaller: the largest size is {fmt(BUILD_VOLUME.x)} × {fmt(BUILD_VOLUME.y)} × {fmt(BUILD_VOLUME.z)} {u}.
+                </p>
+              )}
             </div>
           )}
           {floating && !outOfBounds && (
@@ -740,7 +931,7 @@ export default function Builder() {
               </div>
               <div>
                 <dt>Size</dt>
-                <dd>{size ? `${fmt(size[0])} × ${fmt(size[1])} × ${fmt(size[2])} mm` : "—"}</dd>
+                <dd>{size ? `${fmt(size[0])} × ${fmt(size[1])} × ${fmt(size[2])} ${u}` : "—"}</dd>
               </div>
               <div>
                 <dt>Color</dt>
